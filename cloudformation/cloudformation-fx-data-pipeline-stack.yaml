@@ -1,0 +1,829 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  FX Data Pipeline for USDJPY
+  Event-driven ingestion, transform, and anomaly detection with Step Functions, Lambda, S3, Athena, CloudWatch, and SNS.
+
+Parameters:
+  FxPairParameter:
+    Type: String
+    Default: USDJPY
+
+  ProjectTag:
+    Type: String
+    Default: yellow
+  
+  DataBucketParameter:
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "Only lowercase letters, numbers, and hyphens"
+    Default: fx-data-pipeline-
+  
+  AthenaQueryBucketParameter:
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "Only lowercase letters, numbers, and hyphens"
+    Default: fx-athena-results-
+  
+  AthenaDatabaseParameter:
+    Type: String
+    Default: fx_data
+  
+  AthenaTableParameter:
+    Type: String
+    Default: fx_rates
+  
+  LambdaCodeBucketParameter:
+    Type: String
+    Default: floydmoratti-lambda-code-bucket
+  
+  LambdaCodeS3KeyIngestParameter:
+    Type: String
+    Default: fx-pipeline/lambda-fx-ingest-function.zip
+
+  LambdaCodeS3KeyTransformParameter:
+    Type: String
+    Default: fx-pipeline/lambda-fx-transform-function.zip
+
+  LambdaCodeS3KeyAnalysisParameter:
+    Type: String
+    Default: fx-pipeline/lambda-fx-analysis-function.zip
+
+  AthenaWorkGroupNameParameter:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_-]{1,128}$"
+    ConstraintDescription: "1-128 characters: letters (AZ, a-z), numbers (0-9), hyphens (-), and underscores (_)"
+    Default: fx-data-workgroup
+
+
+Resources:
+
+  # ----------------------
+  # S3 Buckets
+  # ----------------------
+
+  FxDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - "${Prefix}${ShortId}"
+        - Prefix: !Ref DataBucketParameter
+          ShortId: !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref AWS::StackId
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  AthenaQueryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - "${Prefix}${ShortId}"
+        - Prefix: !Ref AthenaQueryBucketParameter
+          ShortId: !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref AWS::StackId
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ----------------------
+  # IAM Roles
+  # ----------------------
+
+  EventBridgeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eventbridge-invoke-fx-step-functions-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principle:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: eventbridge-invoke-fx-step-functions-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowStepFunctionAccess
+                Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !GetAtt FxPipelineStateMachine.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  
+  LambdaIngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-fx-ingest-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principle:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-fx-ingest-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SSMGetAPIKey
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/fx/api/access_key"
+              - Sid: S3WriteRawFXData
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${FxDataBucket.Arn}/raw/*"
+              - Sid: CloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaTransformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-fx-transform-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principle:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-fx-transform-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3ReadRawFXData
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${FxDataBucket.Arn}/raw/*"
+              - Sid: S3WriteProcessedFXData
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${FxDataBucket.Arn}/processed/*"
+              - Sid: CloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaAnalysisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-fx-analysis-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principle:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-fx-analysis-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AthenaQueryAccess
+                Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${FxAthenaWorkGroup}"
+              - Sid: GlueReadAccessForAthena
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                Resource:
+                  - "*"
+              - Sid: S3ListFXBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt FxDataBucket.Arn
+              - Sid: S3ReadFXObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${FxDataBucket.Arn}/processed/*"
+              - Sid: S3AthenaQueryBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AthenaQueryBucket.Arn
+                  - !Sub "${AthenaQueryBucket.Arn}/*"
+              - Sid: CloudWatchAccess
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource:
+                  - "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:*
+                Resource:
+                  - "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: stepfunctions-fx-invoke-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principle:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: stepfunctions-fx-invoke-lambda-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowLambdaInvocation
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LambdaIngestAlias.AliasArn
+                  - !GetAtt LambdaTransformAlias.AliasArn
+                  - !GetAtt LambdaAnalysisAlias.AliasArn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ----------------------
+  # Lambda Functions
+  # ----------------------
+
+  LambdaIngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-fx-ingest-function
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaIngestRole.Arn
+      Runtime: python3.11
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucketParameter
+        S3Key: !Ref LambdaCodeS3KeyIngestParameter
+      Environment:
+        Variables:
+          BASE_CURRENCY: USD
+          BUCKET_NAME: !Ref FxDataBucket
+          FX_API_URL: "https://api.exchangerate.host/live"
+          TARGET_CURRENCIES: JPY
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaIngestVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref LambdaIngestFunction
+
+  LambdaIngestAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: prod
+      FunctionName: !Ref LambdaIngestFunction
+      FunctionVersion: !GetAtt LambdaIngestVersion.Version
+
+  LambdaTransformFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-fx-transform-function
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaTransformRole.Arn
+      Runtime: python3.11
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucketParameter
+        S3Key: !Ref LambdaCodeS3KeyTransformParameter
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref FxDataBucket
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaTransformVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref LambdaTransformFunction
+
+  LambdaTransformAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: prod
+      FunctionName: !Ref LambdaTransformFunction
+      FunctionVersion: !GetAtt LambdaTransformVersion.Version
+        
+  LambdaAnalysisFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-fx-analysis-function
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaAnalysisRole.Arn
+      Runtime: python3.11
+      Timeout: 90
+      MemorySize: 128
+      Code:
+        S3Bucket: !Ref LambdaCodeBucketParameter
+        S3Key: !Ref LambdaCodeS3KeyAnalysisParameter
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref AthenaDatabaseParameter
+          ATHENA_TABLE: !Ref AthenaTableParameter
+          ATHENA_OUTPUT: !Sub "s3://${AthenaQueryBucket}/queries/"
+          ATHENA_WORKGROUP: !Ref AthenaWorkGroupNameParameter
+          PAIR: !Ref FxPairParameter
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaAnalysisVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref LambdaAnalysisFunction
+
+  LambdaAnalysisAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      Name: prod
+      FunctionName: !Ref LambdaAnalysisFunction
+      FunctionVersion: !GetAtt LambdaAnalysisVersion.Version
+
+  # ----------------------
+  # Step Function
+  # ----------------------
+
+  FxPipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: stepfunctions-fx-pipeline
+      Definition:
+        Comment: >-
+          A state machine that triggers lambda functions to ingest, transform
+          and analyze fx data
+        StartAt: IngestFXData
+        States:
+          IngestFXData:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${LambdaIngestFunctionArn}
+              Payload:
+                run_date.$: $.time
+            ResultPath: $.ingest_result
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - States.TaskFailed
+                MaxAttempts: 3
+                BackoffRate: 2
+                IntervalSeconds: 30
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: IngestFailed
+            Next: TransformFXData
+          IngestFailed:
+            Type: Fail
+            Cause: FX ingestion failed
+            Error: IngestFailure
+          TransformFailed:
+            Type: Fail
+            Error: TransformFailure
+            Cause: FX transform failed
+          AnalysisFailed:
+            Type: Fail
+            Error: AnalysisFailure
+            Cause: FX Analysis Failed
+          TransformFXData:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${LambdaTransformFunctionArn}
+              Payload:
+                run_date.$: $.time
+            ResultPath: $.transform_result
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - States.TaskFailed
+                IntervalSeconds: 30
+                MaxAttempts: 3
+                BackoffRate: 2
+            Next: RunFXAnalysis
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: TransformFailed
+          RunFXAnalysis:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${LambdaAnalysisFunctionArn}
+              Payload:
+                run_date.$: $.time
+            ResultPath: $.analysis_result
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                  - States.TaskFailed
+                MaxAttempts: 2
+                BackoffRate: 2
+                IntervalSeconds: 30
+            Next: Success
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: AnalysisFailed
+          Success:
+            Type: Succeed
+      DefinitionSubstitutions:
+        LambdaIngestFunctionArn: !GetAtt LambdaIngestAlias.AliasArn
+        LambdaTransformFunctionArn: !GetAtt LambdaTransformAlias.AliasArn
+        LambdaAnalysisFunctionArn: !GetAtt LambdaAnalysisAlias.AliasArn
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      StateMachineType: STANDARD
+      EncryptionConfiguration:
+        Type: AWS_OWNED_KEY
+      LoggingConfiguration:
+        Level: 'OFF'
+        IncludeExecutionData: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ----------------------
+  # EventBridge Schedule
+  # ----------------------
+
+  FxPipelineSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: fx-pipeline-schedule-rule
+      ScheduleExpression: "cron(5 0 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !Ref FxPipelineStateMachine
+          Id: FxPipelineStateMachineTarget
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ----------------------
+  # CloudWatch SNS Topic (for alerts)
+  # ----------------------
+
+  FxPipelineAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: fx-data-ingestion-alerts
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ----------------------
+  # Athena & Glue
+  # ----------------------
+
+  FxAthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Ref AthenaWorkGroupNameParameter
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaQueryBucket}/queries/"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  FxGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref AthenaDatabaseParameter
+        Description: FX rate data
+  
+  FxRatesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AthenaDatabaseParameter
+      TableInput:
+        Name: !Ref AthenaTableParameter
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.pair.type: enum
+          projection.pair.values: !Ref FxPairParameter
+          projection.year.type: integer
+          projection.year.range: "2020,2030"
+          projection.month.type: integer
+          projection.month.range: "1,12"
+          projection.month.digits: "2"
+          projection.day.type: integer
+          projection.day.range: "1,31"
+          projection.day.digits: "2"
+          storage.location.template: !Sub >
+            s3://${FxDataBucket}/processed/pair=${!pair}/year=${!year}/month=${!month}/day=${!day}/
+        StorageDescriptor:
+          Location: !Sub s3://${FxDataBucket}/processed
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - Name: rate
+              Type: double
+            - Name: date
+              Type: string
+            - Name: market_open
+              Type: boolean
+        PartitionKeys:
+          - Name: pair
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+
+  # ----------------------
+  # CloudWatch Alarms
+  # ----------------------
+
+  LambdaIngestErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-ingest-errors
+      AlarmDescription: >
+        Triggers when the FX ingestion Lambda encounters at least one error
+        within a 24-hour period. Indicates a failure in external API access
+        or S3 write operations
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaIngestFunction
+      Statistic: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaTransformErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-transform-errors
+      AlarmDescription: >
+        Triggers when the FX transform Lambda encounters at least one error
+        within a 24-hour period. Indicates a failure in s3 read or write
+        operations
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaTransformFunction
+      Statistic: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaAnalysisErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-analysis-errors
+      AlarmDescription: >
+        Triggers when the FX analysis Lambda encounters at least one error
+        within a 24-hour period. Indicates a failure in athena, glue or s3
+        access
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaAnalysisFunction
+      Statistic: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaIngestNoInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-ingest-no-invocations
+      AlarmDescription: >
+        Triggers when the FX transform Lambda records zero invocations
+        over a 24-hour period. This suggests a scheduling issue.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaIngestFunction
+      Statistic: Sum
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 0
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaTransformNoInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-transform-no-invocations
+      AlarmDescription: >
+        Triggers when the FX transform Lambda records zero invocations
+        over a 24-hour period. This suggests a pipeline execution failure
+        upstream or a scheduling issue.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaTransformFunction
+      Statistic: Sum
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 0
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  LambdaAnalysisNoInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-lambda-analysis-no-invocations
+      AlarmDescription: >
+        Triggers when the FX analysis Lambda records zero invocations
+        over a 24-hour period. This suggests a pipeline execution failure
+        upstream or a scheduling issue.
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaAnalysisFunction
+      Statistic: Sum
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 0
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  FxDeviationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: fx-usdjpy-deviation-alert
+      AlarmDescription: >
+        Triggers when the USD/JPY exchange rate deviates by 2 percent or more
+        compared to the previous trading day. This may indicate abnormal
+        market movement or data quality issues.
+      Namespace: FX/Analysis
+      MetricName: USDJPYDeviation
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaAnalysisFunction
+      Statistic: Sum
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 2
+      Period: 86400
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FxPipelineAlertTopic
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+
+
+Outputs:
+
+  IngestLambdaAliasArn:
+    Value: !GetAtt LambdaIngestAlias.AliasArn
+  TransformLambdaAliasArn:
+    Value: !GetAtt LambdaTransformAlias.AliasArn
+  AnalysisLambdaAliasArn:
+    Value: !GetAtt LambdaAnalysisAlias.AliasArn
+  StepFunctionArn:
+    Value: !Ref FxPipelineStateMachine
+  FxDataBucketName:
+    Value: !Ref FxDataBucket
+  AthenaQueryBucketName:
+    Value: !Ref AthenaQueryBucket
+  ProjectTagName:
+    Value: !Ref ProjectTag

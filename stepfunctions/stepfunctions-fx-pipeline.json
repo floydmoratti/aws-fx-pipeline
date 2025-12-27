@@ -1,0 +1,123 @@
+{
+  "Comment": "A state machine that triggers lambda functions to ingest, transform and analyze fx data",
+  "StartAt": "IngestFXData",
+  "States": {
+    "IngestFXData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:687185077919:function:lambda-fx-ingest-function:$LATEST",
+        "Payload": {
+          "run_date.$": "$.time"
+        }
+      },
+      "ResultPath": "$.ingest_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "IntervalSeconds": 30
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "IngestFailed"
+        }
+      ],
+      "Next": "TransformFXData"
+    },
+    "IngestFailed": {
+      "Type": "Fail",
+      "Cause": "FX ingestion failed",
+      "Error": "IngestFailure"
+    },
+    "TransformFailed": {
+      "Type": "Fail",
+      "Error": "TransformFailure",
+      "Cause": "FX transform failed"
+    },
+    "AnalysisFailed": {
+      "Type": "Fail",
+      "Error": "AnalysisFailure",
+      "Cause": "FX Analysis Failed"
+    },
+    "TransformFXData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:687185077919:function:lambda-fx-transform-function:$LATEST",
+        "Payload": {
+          "run_date.$": "$.time"
+        }
+      },
+      "ResultPath": "$.transform_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "RunFXAnalysis",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "TransformFailed"
+        }
+      ]
+    },
+    "RunFXAnalysis": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:687185077919:function:lambda-fx-analysis-function:$LATEST",
+        "Payload": {
+          "run_date.$": "$.time"
+        }
+      },
+      "ResultPath": "$.analysis_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "IntervalSeconds": 30
+        }
+      ],
+      "Next": "Success",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "AnalysisFailed"
+        }
+      ]
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadRawFXData",
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::fx-data-pipeline-usd-jpy/raw/*"
+        },
+        {
+            "Sid": "WriteProcessedFXData",
+            "Effect": "Allow",
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::fx-data-pipeline-usd-jpy/processed/*"
+        },
+        {
+            "Sid": "CloudWatchLogging",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "DeadLetterQueue",
+            "Effect": "Allow",
+            "Action": "sqs:SendMessage",
+            "Resource": "arn:aws:sqs:us-east-1:687185077919:sqs-fx-transform-dlq"
+        }
+    ]
+}

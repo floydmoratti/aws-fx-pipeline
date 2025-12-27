@@ -1,0 +1,74 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AthenaQueryAccess",
+            "Effect": "Allow",
+            "Action": [
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults"
+            ],
+            "Resource": [
+                "arn:aws:athena:us-east-1:687185077919:workgroup/fx-data-workgroup"
+            ]
+        },
+        {
+            "Sid": "CloudWatchAccess",
+            "Effect": "Allow",
+            "Action": [
+                "cloudwatch:PutMetricData"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": "logs:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "AthenaResultsBucketAccess",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketLocation",
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::fx-data-pipeline-athena-results",
+                "arn:aws:s3:::fx-data-pipeline-athena-results/*"
+            ]
+        },
+        {
+            "Sid": "GlueReadAccessForAthena",
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:GetPartition",
+                "glue:GetPartitions"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "AthenaReadFXData",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Resource": "arn:aws:s3:::fx-data-pipeline-usd-jpy"
+        },
+        {
+            "Sid": "AthenaReadFXObjects",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": "arn:aws:s3:::fx-data-pipeline-usd-jpy/processed/*"
+        }
+    ]
+}
