@@ -1,0 +1,4 @@
+template-file-path: cloudformation/cloudformation-fx-data-pipeline-stack.yaml
+parameters:
+  Environment: dev
+tags: {}
