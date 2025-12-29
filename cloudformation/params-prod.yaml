@@ -1,4 +1,4 @@
-template-file-path: cloudformation/cloudformation-fx-data-pipeline-stack.yaml
+template-file-path: cloudformation/template.yaml
 parameters:
   Environment: prod
 tags: {}
