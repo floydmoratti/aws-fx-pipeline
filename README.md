@@ -13,7 +13,7 @@
 <h3 align="center">FX Data Pipeline</h3>
 
   <p align="center">
-    AWS Event-driven ingestion, transform, and anomaly detection with Step Functions, Lambda, S3, Athena, CloudWatch, and SNS.
+    AWS Event-driven ingestion, transform, and anomaly detection with EventBridge, Step Functions, Lambda, S3, Athena, CloudWatch, and SNS.
   </p>
 </div>
 
