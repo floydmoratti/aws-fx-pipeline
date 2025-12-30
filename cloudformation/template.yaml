@@ -494,7 +494,7 @@ Resources:
                   - Lambda.AWSLambdaException
                   - Lambda.SdkClientException
                   - States.TaskFailed
-                MaxAttempts: 0
+                MaxAttempts: 1
                 BackoffRate: 2
                 IntervalSeconds: 30
             Catch:
@@ -529,7 +529,7 @@ Resources:
                   - Lambda.SdkClientException
                   - States.TaskFailed
                 IntervalSeconds: 30
-                MaxAttempts: 0
+                MaxAttempts: 1
                 BackoffRate: 2
             Next: RunFXAnalysis
             Catch:
@@ -550,7 +550,7 @@ Resources:
                   - Lambda.AWSLambdaException
                   - Lambda.SdkClientException
                   - States.TaskFailed
-                MaxAttempts: 0
+                MaxAttempts: 1
                 BackoffRate: 2
                 IntervalSeconds: 30
             Next: Success
