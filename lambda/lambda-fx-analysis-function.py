@@ -157,9 +157,9 @@ def lambda_handler(event, context):
     year_pd, month_pd, day_pd = get_yesterdays_date(fx_dt)
 
     # Guard: market closed
-    # if is_weekend(fx_dt):
-    #    logging.info("Market closed (weekend). Skipping anomaly check.")
-    #    return {"status": "skipped", "reason": "weekend"}
+    if is_weekend(fx_dt):
+        logging.info("Market closed (weekend). Skipping anomaly check.")
+        return {"status": "skipped", "reason": "weekend"}
 
     published_metrics = []
 
